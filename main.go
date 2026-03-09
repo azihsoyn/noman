@@ -20,6 +20,9 @@ Options:
   --debug       Show generated args without executing
   --help, -h    Show this help
 
+Subcommands:
+  man [command]  Show past usage from history (like a personal man page)
+
 Examples:
   cat data.json | noman jq "filter items where title contains XYZ"
   noman curl "fetch HTML from example.com"
@@ -60,6 +63,17 @@ func parseOptions() options {
 		default:
 			rest = append(rest, a)
 		}
+	}
+
+	if len(rest) < 1 {
+		fmt.Fprint(os.Stderr, usage)
+		os.Exit(1)
+	}
+
+	// Handle "noman man [command]" subcommand
+	if rest[0] == "man" {
+		showMan(rest[1:])
+		os.Exit(0)
 	}
 
 	if len(rest) < 2 {
