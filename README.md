@@ -61,8 +61,26 @@ cat log.txt | noman grep "extract lines that look like errors"
 # awk: text processing
 cat access.log | noman awk "count requests per status code"
 
-# ffmpeg: media conversion
-noman ffmpeg "convert input.mp4 to 720p gif"
+# find: search files (everyone forgets the syntax)
+noman find "log files older than 7 days"
+
+# tar: always confusing flags
+noman tar "compress src directory into backup.tar.gz"
+
+# ffmpeg: the ultimate "just google it" command
+noman ffmpeg "cut first 30 seconds of input.mp4 and convert to gif"
+
+# imagemagick: another options nightmare
+noman convert "resize photo.png to 800px width, save as JPEG quality 85"
+
+# rsync: too many flags to remember
+noman rsync "copy src to dst, exclude .git, dry run"
+
+# docker: cleanup
+noman docker "remove all stopped containers and dangling images"
+
+# git: complex log queries
+noman git "show only merge commits from last week"
 ```
 
 ## How it works

@@ -306,6 +306,7 @@ RULES:
 - Do NOT include the command name itself.
 - If stdin data is provided, consider its structure when generating arguments.
 - Output one argument per line. If an argument contains spaces, wrap it in single quotes.
+- The command will be run non-interactively. NEVER use options that open an editor or require interactive input. Use inline alternatives instead (e.g. "git commit -m 'message'" instead of "git commit").
 `, command))
 
 	if helpText != "" {
