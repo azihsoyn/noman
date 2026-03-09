@@ -802,17 +802,27 @@ func execute(command string, args []string, stdinData []byte, shell bool) error 
 // looksLikeCommentary detects lines that are explanatory text rather than args.
 // e.g. "Wait, `du` doesn't have --sort." or "This needs a pipe..."
 func looksLikeCommentary(line string) bool {
-	// Arguments typically start with - or are short tokens.
-	// Commentary tends to be long and contain sentence-like patterns.
-	words := strings.Fields(line)
-	if len(words) >= 6 {
-		return true
+	// Lines that start with typical argument characters are never commentary
+	trimmed := strings.TrimSpace(line)
+	if len(trimmed) == 0 {
+		return false
 	}
+	switch trimmed[0] {
+	case '-', '.', '/', '\'', '"', '[', '{', '(', '*', '~', '$', '|', '<', '>':
+		return false
+	}
+
+	// Check for known commentary markers
 	lower := strings.ToLower(line)
-	for _, marker := range []string{"wait", "note:", "let me", "this ", "however", "instead", "actually", "sorry", "correction"} {
+	for _, marker := range []string{"wait", "note:", "let me", "this ", "however", "instead", "actually", "sorry", "correction", "i ", "the "} {
 		if strings.Contains(lower, marker) {
 			return true
 		}
+	}
+	// Long lines without argument-like characters are likely commentary
+	words := strings.Fields(line)
+	if len(words) >= 8 {
+		return true
 	}
 	return false
 }
