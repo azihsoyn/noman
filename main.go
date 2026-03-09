@@ -77,6 +77,11 @@ func main() {
 	command := opts.command
 	prompt := opts.prompt
 
+	// Check if command exists
+	if _, err := exec.LookPath(command); err != nil {
+		fatal("command not found: %s", command)
+	}
+
 	// Read stdin if piped
 	var stdinData []byte
 	stat, _ := os.Stdin.Stat()
@@ -322,20 +327,32 @@ RULES:
 	return sb.String()
 }
 
+// parseArgs splits a string into arguments using shell-like tokenization.
+// Supports single quotes, double quotes, and space/newline delimiters.
 func parseArgs(text string) []string {
-	lines := strings.Split(text, "\n")
 	var args []string
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
+	var current strings.Builder
+	inSingle := false
+	inDouble := false
+
+	for i := 0; i < len(text); i++ {
+		ch := text[i]
+		switch {
+		case ch == '\'' && !inDouble:
+			inSingle = !inSingle
+		case ch == '"' && !inSingle:
+			inDouble = !inDouble
+		case (ch == ' ' || ch == '\t' || ch == '\n') && !inSingle && !inDouble:
+			if current.Len() > 0 {
+				args = append(args, current.String())
+				current.Reset()
+			}
+		default:
+			current.WriteByte(ch)
 		}
-		// Handle quoted arguments
-		if (strings.HasPrefix(line, "'") && strings.HasSuffix(line, "'")) ||
-			(strings.HasPrefix(line, "\"") && strings.HasSuffix(line, "\"")) {
-			line = line[1 : len(line)-1]
-		}
-		args = append(args, line)
+	}
+	if current.Len() > 0 {
+		args = append(args, current.String())
 	}
 	return args
 }
