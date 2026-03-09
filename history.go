@@ -77,13 +77,11 @@ func stdinHash(data []byte) string {
 	return fmt.Sprintf("%x", hash[:8])
 }
 
-// FindExact returns cached args if the same command+prompt was used before.
-// Stdin is NOT part of the cache key since the same prompt intent
-// should produce the same args regardless of data.
-func (h *History) FindExact(command, prompt string) ([]string, bool) {
+// FindExact returns cached args if the same command+prompt+stdin was used before.
+func (h *History) FindExact(command, prompt string, sHash string) ([]string, bool) {
 	for i := len(h.Entries) - 1; i >= 0; i-- {
 		e := &h.Entries[i]
-		if e.Command == command && e.Prompt == prompt {
+		if e.Command == command && e.Prompt == prompt && e.StdinHash == sHash {
 			e.UseCount++
 			return e.Args, true
 		}

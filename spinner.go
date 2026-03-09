@@ -15,6 +15,7 @@ type Spinner struct {
 	message string
 	stop    chan struct{}
 	done    sync.WaitGroup
+	once    sync.Once
 }
 
 func NewSpinner(message string) *Spinner {
@@ -48,6 +49,8 @@ func (s *Spinner) Start() {
 }
 
 func (s *Spinner) Stop() {
-	close(s.stop)
+	s.once.Do(func() {
+		close(s.stop)
+	})
 	s.done.Wait()
 }

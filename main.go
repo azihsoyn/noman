@@ -98,7 +98,7 @@ func main() {
 
 	// Check exact cache first (unless disabled)
 	if !opts.noCache {
-		if args, ok := history.FindExact(command, prompt); ok {
+		if args, ok := history.FindExact(command, prompt, stdinHash(stdinData)); ok {
 			fmt.Fprintf(os.Stderr, "[noman] (cached) %s %s\n", command, strings.Join(args, " "))
 			if opts.debug {
 				return
@@ -117,30 +117,41 @@ func main() {
 	// Get few-shot examples from history
 	examples := history.FewShotExamples(command)
 
-	// Generate args via AI
+	// Generate args via AI (cancellable with Ctrl+C)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
 	spin := NewSpinner(fmt.Sprintf("Generating args for %s...", command))
 	spin.Start()
-	args, err := generateArgs(command, prompt, helpText, stdinData, examples)
+	result, err := generateArgs(ctx, command, prompt, helpText, stdinData, examples)
 	spin.Stop()
+	// Restore terminal state in case claude messed with it
+	exec.Command("stty", "sane").Run()
 	if err != nil {
+		if strings.Contains(err.Error(), "cancelled") || strings.Contains(err.Error(), "signal: killed") {
+			fmt.Fprintf(os.Stderr, "[noman] cancelled\n")
+			os.Exit(130)
+		}
 		fatal("failed to generate args: %v", err)
 	}
 
-	// Save to history
-	history.Add(command, prompt, args, stdinData)
-	if err := history.save(); err != nil {
-		fmt.Fprintf(os.Stderr, "[noman] warning: failed to save history: %v\n", err)
+	// Save to history only if cacheable
+	if result.cacheable {
+		history.Add(command, prompt, result.args, stdinData)
+		if err := history.save(); err != nil {
+			fmt.Fprintf(os.Stderr, "[noman] warning: failed to save history: %v\n", err)
+		}
 	}
 
 	// Print the generated command to stderr for visibility
-	fmt.Fprintf(os.Stderr, "[noman] %s %s\n", command, strings.Join(args, " "))
+	fmt.Fprintf(os.Stderr, "[noman] %s %s\n", command, strings.Join(result.args, " "))
 
 	if opts.debug {
 		return
 	}
 
 	// Execute the command
-	if err := execute(command, args, stdinData); err != nil {
+	if err := execute(command, result.args, stdinData); err != nil {
 		os.Exit(1)
 	}
 }
@@ -174,7 +185,31 @@ func getCommandHelp(command string) string {
 	return ""
 }
 
-func generateArgs(command, prompt, helpText string, stdinData []byte, examples []HistoryEntry) ([]string, error) {
+type aiResult struct {
+	args      []string
+	cacheable bool
+}
+
+// parseAIResponse extracts the CACHEABLE directive and args from AI output.
+func parseAIResponse(text string) aiResult {
+	text = strings.TrimSpace(text)
+	cacheable := true
+
+	if strings.HasPrefix(text, "CACHEABLE:") {
+		idx := strings.IndexByte(text, '\n')
+		if idx == -1 {
+			// Only the directive, no args
+			return aiResult{cacheable: strings.TrimPrefix(text, "CACHEABLE:") == "yes"}
+		}
+		directive := strings.TrimSpace(text[:idx])
+		text = strings.TrimSpace(text[idx+1:])
+		cacheable = directive == "CACHEABLE:yes"
+	}
+
+	return aiResult{args: parseArgs(text), cacheable: cacheable}
+}
+
+func generateArgs(ctx context.Context, command, prompt, helpText string, stdinData []byte, examples []HistoryEntry) (aiResult, error) {
 	backend := os.Getenv("NOMAN_BACKEND")
 	if backend == "" {
 		backend = "cli"
@@ -182,28 +217,28 @@ func generateArgs(command, prompt, helpText string, stdinData []byte, examples [
 
 	switch backend {
 	case "cli":
-		return generateArgsCLI(command, prompt, helpText, stdinData, examples)
+		return generateArgsCLI(ctx, command, prompt, helpText, stdinData, examples)
 	case "api":
-		return generateArgsAPI(command, prompt, helpText, stdinData, examples)
+		return generateArgsAPI(ctx, command, prompt, helpText, stdinData, examples)
 	default:
-		return nil, fmt.Errorf("unknown backend: %s (use 'cli' or 'api')", backend)
+		return aiResult{}, fmt.Errorf("unknown backend: %s (use 'cli' or 'api')", backend)
 	}
 }
 
-func generateArgsCLI(command, prompt, helpText string, stdinData []byte, examples []HistoryEntry) ([]string, error) {
+func generateArgsCLI(ctx context.Context, command, prompt, helpText string, stdinData []byte, examples []HistoryEntry) (aiResult, error) {
 	claudePath := os.Getenv("NOMAN_CLAUDE_PATH")
 	if claudePath == "" {
 		var err error
 		claudePath, err = exec.LookPath("claude")
 		if err != nil {
-			return nil, fmt.Errorf("claude command not found. Set NOMAN_CLAUDE_PATH or install Claude Code, or use NOMAN_BACKEND=api")
+			return aiResult{}, fmt.Errorf("claude command not found. Set NOMAN_CLAUDE_PATH or install Claude Code, or use NOMAN_BACKEND=api")
 		}
 	}
 
 	systemPrompt := buildSystemPrompt(command, helpText, stdinData, examples)
 	fullPrompt := systemPrompt + "\n\nUser request: " + prompt
 
-	cmd := exec.Command(claudePath, "-p", fullPrompt)
+	cmd := exec.CommandContext(ctx, claudePath, "-p", fullPrompt)
 	// Allow running inside Claude Code sessions
 	env := os.Environ()
 	filteredEnv := make([]string, 0, len(env))
@@ -214,24 +249,28 @@ func generateArgsCLI(command, prompt, helpText string, stdinData []byte, example
 	}
 	cmd.Env = filteredEnv
 	var stdout, stderr bytes.Buffer
+	cmd.Stdin = bytes.NewReader(nil)
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 
 	if err := cmd.Run(); err != nil {
-		return nil, fmt.Errorf("claude command failed: %v\n%s", err, stderr.String())
+		if ctx.Err() != nil {
+			return aiResult{}, fmt.Errorf("cancelled")
+		}
+		return aiResult{}, fmt.Errorf("claude command failed: %v\n%s", err, stderr.String())
 	}
 
 	text := strings.TrimSpace(stdout.String())
-	return parseArgs(text), nil
+	return parseAIResponse(text), nil
 }
 
-func generateArgsAPI(command, prompt, helpText string, stdinData []byte, examples []HistoryEntry) ([]string, error) {
+func generateArgsAPI(ctx context.Context, command, prompt, helpText string, stdinData []byte, examples []HistoryEntry) (aiResult, error) {
 	apiKey := os.Getenv("NOMAN_API_KEY")
 	if apiKey == "" {
 		apiKey = os.Getenv("ANTHROPIC_API_KEY")
 	}
 	if apiKey == "" {
-		return nil, fmt.Errorf("set ANTHROPIC_API_KEY or NOMAN_API_KEY environment variable")
+		return aiResult{}, fmt.Errorf("set ANTHROPIC_API_KEY or NOMAN_API_KEY environment variable")
 	}
 
 	model := os.Getenv("NOMAN_MODEL")
@@ -257,12 +296,12 @@ func generateArgsAPI(command, prompt, helpText string, stdinData []byte, example
 
 	body, err := json.Marshal(reqBody)
 	if err != nil {
-		return nil, err
+		return aiResult{}, err
 	}
 
-	req, err := http.NewRequest("POST", baseURL+"/v1/messages", bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, "POST", baseURL+"/v1/messages", bytes.NewReader(body))
 	if err != nil {
-		return nil, err
+		return aiResult{}, err
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-API-Key", apiKey)
@@ -271,30 +310,30 @@ func generateArgsAPI(command, prompt, helpText string, stdinData []byte, example
 	client := &http.Client{Timeout: 30 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("API request failed: %v", err)
+		return aiResult{}, fmt.Errorf("API request failed: %v", err)
 	}
 	defer resp.Body.Close()
 
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, err
+		return aiResult{}, err
 	}
 
 	if resp.StatusCode != 200 {
-		return nil, fmt.Errorf("API error (status %d): %s", resp.StatusCode, string(respBody))
+		return aiResult{}, fmt.Errorf("API error (status %d): %s", resp.StatusCode, string(respBody))
 	}
 
 	var apiResp anthropicResponse
 	if err := json.Unmarshal(respBody, &apiResp); err != nil {
-		return nil, fmt.Errorf("failed to parse response: %v", err)
+		return aiResult{}, fmt.Errorf("failed to parse response: %v", err)
 	}
 
 	if len(apiResp.Content) == 0 {
-		return nil, fmt.Errorf("empty response from API")
+		return aiResult{}, fmt.Errorf("empty response from API")
 	}
 
 	text := strings.TrimSpace(apiResp.Content[0].Text)
-	return parseArgs(text), nil
+	return parseAIResponse(text), nil
 }
 
 func buildSystemPrompt(command, helpText string, stdinData []byte, examples []HistoryEntry) string {
@@ -307,6 +346,9 @@ RULES:
 - If stdin data is provided, consider its structure when generating arguments.
 - Output one argument per line. If an argument contains spaces, wrap it in single quotes.
 - The command will be run non-interactively. NEVER use options that open an editor or require interactive input. Use inline alternatives instead (e.g. "git commit -m 'message'" instead of "git commit").
+- On the FIRST line, output either CACHEABLE:yes or CACHEABLE:no
+  - CACHEABLE:yes if the same prompt would always produce the same args (e.g. filtering, searching, converting)
+  - CACHEABLE:no if the args depend on runtime context like current time, git state, or generated content (e.g. commit messages, timestamps, dynamic values)
 `, command))
 
 	if helpText != "" {
