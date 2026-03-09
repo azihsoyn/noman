@@ -46,6 +46,21 @@ noman [options] <command> "<prompt>"
 | `--debug` | Show generated args without executing |
 | `--help`, `-h` | Show help |
 
+### Subcommands
+
+| Subcommand | Description |
+|---|---|
+| `man` | Show all past usage grouped by command |
+| `man <command>` | Show detailed history for a specific command |
+
+```bash
+# Show your personal man pages for all commands
+noman man
+
+# Show history for a specific command
+noman man jq
+```
+
 ### Examples
 
 ```bash
@@ -92,9 +107,53 @@ noman git "show only merge commits from last week"
 
 ### History & caching
 
-- **Exact match cache**: Same command + prompt reuses cached args instantly (no AI call)
+- **Exact match cache**: Same command + prompt + stdin reuses cached args instantly (no AI call)
+- **Smart cache**: AI decides whether results should be cached (e.g. `jq` filters are cached, `git commit` messages are not)
 - **Few-shot learning**: Past conversions for the same command are included as examples to improve accuracy
 - History is stored in `~/.config/noman/history.json`
+- Use `noman man` to browse your history as a personal man page
+
+## Configuration
+
+Settings are loaded in order of priority:
+
+1. **Environment variables** (highest priority)
+2. **Config file** (`~/.config/noman/config.toml` or `config.json`)
+3. **Default values**
+
+### Config file
+
+Create `~/.config/noman/config.toml`:
+
+```toml
+backend      = "cli"
+claude_path  = "/path/to/claude"
+model        = "claude-sonnet-4-20250514"
+max_history  = 500
+```
+
+Or `~/.config/noman/config.json`:
+
+```json
+{
+  "backend": "cli",
+  "claude_path": "/path/to/claude",
+  "model": "claude-sonnet-4-20250514",
+  "max_history": 500
+}
+```
+
+### All settings
+
+| Config key / Env var | Description | Default |
+|---|---|---|
+| `backend` / `NOMAN_BACKEND` | `cli` or `api` | `cli` |
+| `claude_path` / `NOMAN_CLAUDE_PATH` | Path to `claude` command | auto-detect |
+| `api_key` / `NOMAN_API_KEY` | API key for `api` backend | `ANTHROPIC_API_KEY` |
+| `model` / `NOMAN_MODEL` | Model name | `claude-sonnet-4-20250514` |
+| `base_url` / `NOMAN_BASE_URL` | API base URL | `https://api.anthropic.com` |
+| `max_history` / `NOMAN_MAX_HISTORY` | Max history entries | `500` |
+| — / `NOMAN_CONFIG_DIR` | Config/history directory | `~/.config/noman` |
 
 ## Backends
 
@@ -108,22 +167,20 @@ noman jq "sum all counts"
 
 ### Anthropic API
 
+Set via config file:
+
+```toml
+backend = "api"
+api_key = "sk-ant-..."
+```
+
+Or environment variables:
+
 ```bash
 export NOMAN_BACKEND=api
 export ANTHROPIC_API_KEY=sk-ant-...
 noman jq "sum all counts"
 ```
-
-## Environment variables
-
-| Variable | Description | Default |
-|---|---|---|
-| `NOMAN_BACKEND` | `cli` or `api` | `cli` |
-| `NOMAN_CLAUDE_PATH` | Path to `claude` command | auto-detect |
-| `NOMAN_API_KEY` | API key for `api` backend | `ANTHROPIC_API_KEY` |
-| `NOMAN_MODEL` | Model name | `claude-sonnet-4-20250514` |
-| `NOMAN_BASE_URL` | API base URL | `https://api.anthropic.com` |
-| `NOMAN_CONFIG_DIR` | Config/history directory | `~/.config/noman` |
 
 ## License
 

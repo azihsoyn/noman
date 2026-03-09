@@ -9,10 +9,7 @@ import (
 	"time"
 )
 
-const (
-	maxHistoryEntries = 500
-	maxFewShotExamples = 5
-)
+const maxFewShotExamples = 5
 
 type HistoryEntry struct {
 	Command   string    `json:"command"`
@@ -28,16 +25,8 @@ type History struct {
 	path    string
 }
 
-func historyDir() string {
-	if dir := os.Getenv("NOMAN_CONFIG_DIR"); dir != "" {
-		return dir
-	}
-	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".config", "noman")
-}
-
 func loadHistory() *History {
-	dir := historyDir()
+	dir := configDir()
 	path := filepath.Join(dir, "history.json")
 
 	h := &History{path: path}
@@ -58,8 +47,9 @@ func (h *History) save() error {
 	}
 
 	// Trim old entries if over limit
-	if len(h.Entries) > maxHistoryEntries {
-		h.Entries = h.Entries[len(h.Entries)-maxHistoryEntries:]
+	max := loadConfig().MaxHistory
+	if len(h.Entries) > max {
+		h.Entries = h.Entries[len(h.Entries)-max:]
 	}
 
 	data, err := json.MarshalIndent(h, "", "  ")

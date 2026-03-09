@@ -29,13 +29,17 @@ Examples:
   cat log.txt | noman grep "extract lines that look like errors"
   noman --no-cache jq "regenerate without cache"
 
-Environment variables:
-  NOMAN_BACKEND      "cli" (default, uses claude command) or "api"
-  NOMAN_CLAUDE_PATH  Path to claude command (default: auto-detect from PATH)
-  NOMAN_API_KEY      API key for api backend (default: ANTHROPIC_API_KEY)
-  NOMAN_MODEL        Model name (default: claude-sonnet-4-20250514)
-  NOMAN_BASE_URL     API base URL (default: https://api.anthropic.com)
-  NOMAN_CONFIG_DIR   Config/history directory (default: ~/.config/noman)
+Config file (~/.config/noman/config.toml or config.json):
+  backend      = "cli"                    # "cli" or "api"
+  claude_path  = ""                       # path to claude command
+  api_key      = ""                       # API key for api backend
+  model        = "claude-sonnet-4-20250514"
+  base_url     = ""                       # API base URL
+  max_history  = 500                      # max history entries
+
+Environment variables (override config):
+  NOMAN_BACKEND, NOMAN_CLAUDE_PATH, NOMAN_API_KEY, NOMAN_MODEL,
+  NOMAN_BASE_URL, NOMAN_MAX_HISTORY, NOMAN_CONFIG_DIR
 `
 
 type options struct {
@@ -125,6 +129,9 @@ func main() {
 		}
 	}
 
+	// Load config
+	cfg := loadConfig()
+
 	// Get command help text
 	helpText := getCommandHelp(command)
 
@@ -137,7 +144,7 @@ func main() {
 
 	spin := NewSpinner(fmt.Sprintf("Generating args for %s...", command))
 	spin.Start()
-	result, err := generateArgs(ctx, command, prompt, helpText, stdinData, examples)
+	result, err := generateArgs(ctx, cfg, command, prompt, helpText, stdinData, examples)
 	spin.Stop()
 	// Restore terminal state in case claude messed with it
 	exec.Command("stty", "sane").Run()
@@ -223,29 +230,24 @@ func parseAIResponse(text string) aiResult {
 	return aiResult{args: parseArgs(text), cacheable: cacheable}
 }
 
-func generateArgs(ctx context.Context, command, prompt, helpText string, stdinData []byte, examples []HistoryEntry) (aiResult, error) {
-	backend := os.Getenv("NOMAN_BACKEND")
-	if backend == "" {
-		backend = "cli"
-	}
-
-	switch backend {
+func generateArgs(ctx context.Context, cfg Config, command, prompt, helpText string, stdinData []byte, examples []HistoryEntry) (aiResult, error) {
+	switch cfg.Backend {
 	case "cli":
-		return generateArgsCLI(ctx, command, prompt, helpText, stdinData, examples)
+		return generateArgsCLI(ctx, cfg, command, prompt, helpText, stdinData, examples)
 	case "api":
-		return generateArgsAPI(ctx, command, prompt, helpText, stdinData, examples)
+		return generateArgsAPI(ctx, cfg, command, prompt, helpText, stdinData, examples)
 	default:
-		return aiResult{}, fmt.Errorf("unknown backend: %s (use 'cli' or 'api')", backend)
+		return aiResult{}, fmt.Errorf("unknown backend: %s (use 'cli' or 'api')", cfg.Backend)
 	}
 }
 
-func generateArgsCLI(ctx context.Context, command, prompt, helpText string, stdinData []byte, examples []HistoryEntry) (aiResult, error) {
-	claudePath := os.Getenv("NOMAN_CLAUDE_PATH")
+func generateArgsCLI(ctx context.Context, cfg Config, command, prompt, helpText string, stdinData []byte, examples []HistoryEntry) (aiResult, error) {
+	claudePath := cfg.ClaudePath
 	if claudePath == "" {
 		var err error
 		claudePath, err = exec.LookPath("claude")
 		if err != nil {
-			return aiResult{}, fmt.Errorf("claude command not found. Set NOMAN_CLAUDE_PATH or install Claude Code, or use NOMAN_BACKEND=api")
+			return aiResult{}, fmt.Errorf("claude command not found. Set claude_path in config or NOMAN_CLAUDE_PATH, or use backend = \"api\"")
 		}
 	}
 
@@ -278,21 +280,15 @@ func generateArgsCLI(ctx context.Context, command, prompt, helpText string, stdi
 	return parseAIResponse(text), nil
 }
 
-func generateArgsAPI(ctx context.Context, command, prompt, helpText string, stdinData []byte, examples []HistoryEntry) (aiResult, error) {
-	apiKey := os.Getenv("NOMAN_API_KEY")
+func generateArgsAPI(ctx context.Context, cfg Config, command, prompt, helpText string, stdinData []byte, examples []HistoryEntry) (aiResult, error) {
+	apiKey := cfg.APIKey
 	if apiKey == "" {
-		apiKey = os.Getenv("ANTHROPIC_API_KEY")
-	}
-	if apiKey == "" {
-		return aiResult{}, fmt.Errorf("set ANTHROPIC_API_KEY or NOMAN_API_KEY environment variable")
+		return aiResult{}, fmt.Errorf("set api_key in config, or ANTHROPIC_API_KEY / NOMAN_API_KEY environment variable")
 	}
 
-	model := os.Getenv("NOMAN_MODEL")
-	if model == "" {
-		model = "claude-sonnet-4-20250514"
-	}
+	model := cfg.Model
 
-	baseURL := os.Getenv("NOMAN_BASE_URL")
+	baseURL := cfg.BaseURL
 	if baseURL == "" {
 		baseURL = "https://api.anthropic.com"
 	}
