@@ -16,9 +16,10 @@ import (
 const usage = `Usage: noman [options] <command> "<prompt>"
 
 Options:
-  --no-cache    Skip cache and always call AI
-  --debug       Show generated args without executing
-  --help, -h    Show this help
+  --no-cache       Skip cache and always call AI
+  --confirm, -c    Show generated args and ask Y/n before executing
+  --debug          Show generated args without executing
+  --help, -h       Show this help
 
 Subcommands:
   man [command]  Show past usage from history (like a personal man page)
@@ -44,6 +45,7 @@ Environment variables (override config):
 
 type options struct {
 	noCache bool
+	confirm bool
 	debug   bool
 	command string
 	prompt  string
@@ -59,6 +61,8 @@ func parseOptions() options {
 		switch a {
 		case "--no-cache":
 			opts.noCache = true
+		case "--confirm", "-c":
+			opts.confirm = true
 		case "--debug":
 			opts.debug = true
 		case "--help", "-h":
@@ -169,6 +173,13 @@ func main() {
 
 	if opts.debug {
 		return
+	}
+
+	if opts.confirm {
+		if !askConfirm() {
+			fmt.Fprintf(os.Stderr, "[noman] aborted\n")
+			return
+		}
 	}
 
 	// Execute the command
@@ -430,6 +441,23 @@ func truncate(s string, maxLen int) string {
 		return s
 	}
 	return s[:maxLen] + "\n... (truncated)"
+}
+
+func askConfirm() bool {
+	tty, err := os.Open("/dev/tty")
+	if err != nil {
+		return false
+	}
+	defer tty.Close()
+
+	fmt.Fprintf(os.Stderr, "[noman] execute? [Y/n] ")
+	buf := make([]byte, 64)
+	n, err := tty.Read(buf)
+	if err != nil {
+		return false
+	}
+	answer := strings.TrimSpace(strings.ToLower(string(buf[:n])))
+	return answer == "" || answer == "y" || answer == "yes"
 }
 
 func fatal(format string, args ...interface{}) {
