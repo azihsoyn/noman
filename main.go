@@ -379,8 +379,10 @@ func buildSystemPrompt(command, helpText string, stdinData []byte, examples []Hi
 	sb.WriteString(fmt.Sprintf(`You are a command-line argument generator. Your task is to convert a natural language description into command-line arguments for the "%s" command.
 
 RULES:
-- Output ONLY the arguments, nothing else. No explanation, no markdown.
+- Output ONLY the arguments for a SINGLE invocation of the command, nothing else. No explanation, no markdown.
 - Do NOT include the command name itself.
+- Do NOT chain multiple commands. Only output args for one command invocation.
+- If the task seems to require multiple commands (e.g. "git add and commit"), focus on the most important one (e.g. just the commit with -am flag).
 - If stdin data is provided, consider its structure when generating arguments.
 - Output one argument per line. If an argument contains spaces, wrap it in single quotes.
 - The command will be run non-interactively. NEVER use options that open an editor or require interactive input. Use inline alternatives instead (e.g. "git commit -m 'message'" instead of "git commit").
