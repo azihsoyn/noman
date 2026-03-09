@@ -79,6 +79,18 @@ func (h *History) FindExact(command, prompt string, sHash string) ([]string, boo
 	return nil, false
 }
 
+// FindByPrompt returns cached command+args matching prompt+stdin (for "which" mode).
+func (h *History) FindByPrompt(prompt string, sHash string) (string, []string, bool) {
+	for i := len(h.Entries) - 1; i >= 0; i-- {
+		e := &h.Entries[i]
+		if e.Prompt == prompt && e.StdinHash == sHash {
+			e.UseCount++
+			return e.Command, e.Args, true
+		}
+	}
+	return "", nil, false
+}
+
 // FewShotExamples returns recent history entries for the same command
 // to use as few-shot examples in the AI prompt.
 func (h *History) FewShotExamples(command string) []HistoryEntry {

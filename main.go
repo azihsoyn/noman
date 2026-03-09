@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -14,21 +15,26 @@ import (
 )
 
 const usage = `Usage: noman [options] <command> "<prompt>"
+       noman which "<prompt>"
 
 Options:
   --no-cache       Skip cache and always call AI
   --confirm, -c    Show generated args and ask Y/n before executing
+  --shell, -s      Execute via shell (enables glob, pipes, etc.)
   --debug          Show generated args without executing
   --help, -h       Show this help
 
 Subcommands:
-  man [command]  Show past usage from history (like a personal man page)
+  which "<prompt>"   AI picks the best command for you
+  man [command]      Show past usage from history (like a personal man page)
 
 Examples:
   cat data.json | noman jq "filter items where title contains XYZ"
   noman curl "fetch HTML from example.com"
   cat log.txt | noman grep "extract lines that look like errors"
   noman --no-cache jq "regenerate without cache"
+  noman which "find all TODO comments in current directory"
+  cat access.log | noman which "count requests per status code"
 
 Config file (~/.config/noman/config.toml or config.json):
   backend      = "cli"                    # "cli" or "api"
@@ -47,6 +53,7 @@ type options struct {
 	noCache bool
 	confirm bool
 	debug   bool
+	shell   bool
 	command string
 	prompt  string
 }
@@ -63,6 +70,8 @@ func parseOptions() options {
 			opts.noCache = true
 		case "--confirm", "-c":
 			opts.confirm = true
+		case "--shell", "-s":
+			opts.shell = true
 		case "--debug":
 			opts.debug = true
 		case "--help", "-h":
@@ -78,10 +87,20 @@ func parseOptions() options {
 		os.Exit(1)
 	}
 
-	// Handle "noman man [command]" subcommand
+	// Handle subcommands
 	if rest[0] == "man" {
 		showMan(rest[1:])
 		os.Exit(0)
+	}
+
+	if rest[0] == "which" {
+		if len(rest) < 2 {
+			fmt.Fprintln(os.Stderr, "Usage: noman which \"<prompt>\"")
+			os.Exit(1)
+		}
+		opts.prompt = strings.Join(rest[1:], " ")
+		// command remains "" to signal auto-command mode
+		return opts
 	}
 
 	if len(rest) < 2 {
@@ -99,17 +118,6 @@ func main() {
 	command := opts.command
 	prompt := opts.prompt
 
-	// Check if command exists (supports paths like ./tool and /usr/local/bin/tool)
-	if strings.Contains(command, "/") {
-		if _, err := os.Stat(command); err != nil {
-			fatal("command not found: %s", command)
-		}
-	} else {
-		if _, err := exec.LookPath(command); err != nil {
-			fatal("command not found: %s", command)
-		}
-	}
-
 	// Read stdin if piped
 	var stdinData []byte
 	stat, _ := os.Stdin.Stat()
@@ -118,6 +126,109 @@ func main() {
 		stdinData, err = io.ReadAll(os.Stdin)
 		if err != nil {
 			fatal("failed to read stdin: %v", err)
+		}
+	}
+
+	// Load config
+	cfg := loadConfig()
+
+	// Auto-command mode: AI picks the command
+	if command == "" {
+		history := loadHistory()
+
+		// Check cache first
+		if !opts.noCache {
+			if cachedCmd, cachedArgs, ok := history.FindByPrompt(prompt, stdinHash(stdinData)); ok {
+				fmt.Fprintf(os.Stderr, "[noman] (cached) %s %s\n", cachedCmd, strings.Join(cachedArgs, " "))
+				if opts.debug {
+					return
+				}
+				if opts.confirm {
+					switch askConfirm() {
+					case confirmYes:
+					case confirmNo:
+						fmt.Fprintf(os.Stderr, "[noman] aborted\n")
+						return
+					case confirmRetry:
+						goto whichGenerate
+					}
+				}
+				if err := execute(cachedCmd, cachedArgs, stdinData, opts.shell); err != nil {
+					os.Exit(1)
+				}
+				_ = history.save()
+				return
+			}
+		}
+	whichGenerate:
+
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		spin := NewSpinner("Figuring out the right command...")
+		spin.Start()
+		cmdResult, err := generateCommandAndArgs(ctx, cfg, prompt, stdinData)
+		spin.Stop()
+		restoreTerminal()
+		if err != nil {
+			if strings.Contains(err.Error(), "cancelled") || strings.Contains(err.Error(), "signal: killed") {
+				fmt.Fprintf(os.Stderr, "[noman] cancelled\n")
+				os.Exit(130)
+			}
+			fatal("failed to generate command: %v", err)
+		}
+		command = cmdResult.command
+
+		// Save to history
+		if cmdResult.cacheable {
+			history.Add(command, prompt, cmdResult.args, stdinData)
+			_ = history.save()
+		}
+
+		for {
+			fmt.Fprintf(os.Stderr, "[noman] %s %s\n", command, strings.Join(cmdResult.args, " "))
+
+			if opts.debug {
+				return
+			}
+
+			if opts.confirm {
+				switch askConfirm() {
+				case confirmYes:
+					// proceed
+				case confirmNo:
+					fmt.Fprintf(os.Stderr, "[noman] aborted\n")
+					return
+				case confirmRetry:
+					fmt.Fprintf(os.Stderr, "[noman] regenerating...\n")
+					spin := NewSpinner("Figuring out the right command...")
+					spin.Start()
+					cmdResult, err = generateCommandAndArgs(ctx, cfg, prompt, stdinData)
+					spin.Stop()
+					restoreTerminal()
+					if err != nil {
+						fatal("failed to generate command: %v", err)
+					}
+					command = cmdResult.command
+					continue
+				}
+			}
+
+			if err := execute(command, cmdResult.args, stdinData, opts.shell); err != nil {
+				os.Exit(1)
+			}
+			return
+		}
+	}
+
+	// Check if command exists (supports paths like ./tool and /usr/local/bin/tool)
+	if strings.Contains(command, "/") {
+		if _, err := os.Stat(command); err != nil {
+			fatal("command not found: %s", command)
+		}
+	} else {
+		if _, err := exec.LookPath(command); err != nil {
+			fatal("command not found: %s", command)
 		}
 	}
 
@@ -131,7 +242,17 @@ func main() {
 			if opts.debug {
 				return
 			}
-			if err := execute(command, args, stdinData); err != nil {
+			if opts.confirm {
+				switch askConfirm() {
+				case confirmYes:
+				case confirmNo:
+					fmt.Fprintf(os.Stderr, "[noman] aborted\n")
+					return
+				case confirmRetry:
+					goto generate
+				}
+			}
+			if err := execute(command, args, stdinData, opts.shell); err != nil {
 				os.Exit(1)
 			}
 			_ = history.save()
@@ -139,9 +260,7 @@ func main() {
 		}
 	}
 
-	// Load config
-	cfg := loadConfig()
-
+generate:
 	// Get command help text
 	helpText := getCommandHelp(command)
 
@@ -157,7 +276,7 @@ func main() {
 	result, err := generateArgs(ctx, cfg, command, prompt, helpText, stdinData, examples)
 	spin.Stop()
 	// Restore terminal state in case claude messed with it
-	exec.Command("stty", "sane").Run()
+	restoreTerminal()
 	if err != nil {
 		if strings.Contains(err.Error(), "cancelled") || strings.Contains(err.Error(), "signal: killed") {
 			fmt.Fprintf(os.Stderr, "[noman] cancelled\n")
@@ -195,7 +314,7 @@ func main() {
 				spin.Start()
 				result, err = generateArgs(ctx, cfg, command, prompt, helpText, stdinData, examples)
 				spin.Stop()
-				exec.Command("stty", "sane").Run()
+				restoreTerminal()
 				if err != nil {
 					fatal("failed to generate args: %v", err)
 				}
@@ -204,7 +323,7 @@ func main() {
 		}
 
 		// Execute the command
-		if err := execute(command, result.args, stdinData); err != nil {
+		if err := execute(command, result.args, stdinData, opts.shell); err != nil {
 			os.Exit(1)
 		}
 		return
@@ -253,7 +372,6 @@ func parseAIResponse(text string) aiResult {
 	if strings.HasPrefix(text, "CACHEABLE:") {
 		idx := strings.IndexByte(text, '\n')
 		if idx == -1 {
-			// Only the directive, no args
 			return aiResult{cacheable: strings.TrimPrefix(text, "CACHEABLE:") == "yes"}
 		}
 		directive := strings.TrimSpace(text[:idx])
@@ -261,7 +379,217 @@ func parseAIResponse(text string) aiResult {
 		cacheable = directive == "CACHEABLE:yes"
 	}
 
-	return aiResult{args: parseArgs(text), cacheable: cacheable}
+	// Filter out commentary lines
+	var cleanLines []string
+	for _, line := range strings.Split(text, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		if looksLikeCommentary(line) {
+			break
+		}
+		cleanLines = append(cleanLines, line)
+	}
+
+	return aiResult{args: parseArgs(strings.Join(cleanLines, "\n")), cacheable: cacheable}
+}
+
+type commandResult struct {
+	command   string
+	args      []string
+	cacheable bool
+}
+
+// parseCommandResponse extracts command, args, and CACHEABLE from AI output.
+// Expected format:
+//
+//	CACHEABLE:yes
+//	COMMAND:grep
+//	-r
+//	TODO
+//	.
+func parseCommandResponse(text string) (commandResult, error) {
+	text = strings.TrimSpace(text)
+	cacheable := true
+	command := ""
+
+	lines := strings.Split(text, "\n")
+	var argLines []string
+	foundCommand := false
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "CACHEABLE:") {
+			cacheable = strings.TrimPrefix(line, "CACHEABLE:") == "yes"
+			continue
+		}
+		if strings.HasPrefix(line, "COMMAND:") {
+			command = strings.TrimSpace(strings.TrimPrefix(line, "COMMAND:"))
+			foundCommand = true
+			continue
+		}
+		if !foundCommand {
+			continue // skip anything before COMMAND: directive
+		}
+		if line == "" {
+			continue
+		}
+		// Stop at lines that look like commentary (contain multiple spaces + common English words)
+		if looksLikeCommentary(line) {
+			break
+		}
+		argLines = append(argLines, line)
+	}
+
+	if command == "" {
+		return commandResult{}, fmt.Errorf("AI did not return a COMMAND: directive")
+	}
+
+	argsText := strings.Join(argLines, "\n")
+	return commandResult{
+		command:   command,
+		args:      parseArgs(argsText),
+		cacheable: cacheable,
+	}, nil
+}
+
+func generateCommandAndArgs(ctx context.Context, cfg Config, prompt string, stdinData []byte) (commandResult, error) {
+	systemPrompt := buildAutoCommandPrompt(stdinData)
+	switch cfg.Backend {
+	case "cli":
+		return generateCommandCLI(ctx, cfg, systemPrompt, prompt)
+	case "api":
+		return generateCommandAPI(ctx, cfg, systemPrompt, prompt)
+	default:
+		return commandResult{}, fmt.Errorf("unknown backend: %s", cfg.Backend)
+	}
+}
+
+func generateCommandCLI(ctx context.Context, cfg Config, systemPrompt, prompt string) (commandResult, error) {
+	claudePath := cfg.ClaudePath
+	if claudePath == "" {
+		var err error
+		claudePath, err = exec.LookPath("claude")
+		if err != nil {
+			return commandResult{}, fmt.Errorf("claude command not found")
+		}
+	}
+
+	fullPrompt := systemPrompt + "\n\nUser request: " + prompt
+	cmd := exec.CommandContext(ctx, claudePath, "-p", fullPrompt)
+	env := os.Environ()
+	filteredEnv := make([]string, 0, len(env))
+	for _, e := range env {
+		if !strings.HasPrefix(e, "CLAUDECODE=") {
+			filteredEnv = append(filteredEnv, e)
+		}
+	}
+	cmd.Env = filteredEnv
+	var stdout, stderr bytes.Buffer
+	cmd.Stdin = bytes.NewReader(nil)
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	if err := cmd.Run(); err != nil {
+		if ctx.Err() != nil {
+			return commandResult{}, fmt.Errorf("cancelled")
+		}
+		return commandResult{}, fmt.Errorf("claude command failed: %v\n%s", err, stderr.String())
+	}
+
+	return parseCommandResponse(stdout.String())
+}
+
+func generateCommandAPI(ctx context.Context, cfg Config, systemPrompt, prompt string) (commandResult, error) {
+	apiKey := cfg.APIKey
+	if apiKey == "" {
+		return commandResult{}, fmt.Errorf("set api_key in config, or ANTHROPIC_API_KEY / NOMAN_API_KEY environment variable")
+	}
+
+	baseURL := cfg.BaseURL
+	if baseURL == "" {
+		baseURL = "https://api.anthropic.com"
+	}
+
+	reqBody := anthropicRequest{
+		Model:     cfg.Model,
+		MaxTokens: 1024,
+		System:    systemPrompt,
+		Messages:  []message{{Role: "user", Content: prompt}},
+	}
+
+	body, err := json.Marshal(reqBody)
+	if err != nil {
+		return commandResult{}, err
+	}
+
+	req, err := http.NewRequestWithContext(ctx, "POST", baseURL+"/v1/messages", bytes.NewReader(body))
+	if err != nil {
+		return commandResult{}, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-API-Key", apiKey)
+	req.Header.Set("Anthropic-Version", "2023-06-01")
+
+	resp, err := (&http.Client{Timeout: 30 * time.Second}).Do(req)
+	if err != nil {
+		return commandResult{}, fmt.Errorf("API request failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return commandResult{}, err
+	}
+
+	if resp.StatusCode != 200 {
+		return commandResult{}, fmt.Errorf("API error (status %d): %s", resp.StatusCode, string(respBody))
+	}
+
+	var apiResp anthropicResponse
+	if err := json.Unmarshal(respBody, &apiResp); err != nil {
+		return commandResult{}, fmt.Errorf("failed to parse response: %v", err)
+	}
+
+	if len(apiResp.Content) == 0 {
+		return commandResult{}, fmt.Errorf("empty response from API")
+	}
+
+	return parseCommandResponse(apiResp.Content[0].Text)
+}
+
+func buildAutoCommandPrompt(stdinData []byte) string {
+	var sb strings.Builder
+	sb.WriteString(`You are a command-line argument generator. The user describes what they want to do, and you determine the best Unix command and its arguments.
+
+OUTPUT FORMAT (strictly follow this, no exceptions):
+Line 1: CACHEABLE:yes or CACHEABLE:no
+Line 2: COMMAND:<command_name>
+Line 3+: one argument per line
+
+EXAMPLE OUTPUT:
+CACHEABLE:yes
+COMMAND:grep
+-r
+TODO
+.
+
+RULES:
+- Output ONLY the lines described above. ABSOLUTELY NO explanation, no commentary, no markdown, no thinking.
+- If an argument contains spaces, wrap it in single quotes.
+- Choose a SINGLE command. Do NOT suggest pipes or multiple commands.
+- If the ideal solution requires pipes, pick the most important command and output only its args.
+- The command will be run non-interactively. NEVER use options that require interactive input.
+- Only use commands commonly available on macOS/Linux.
+- Do NOT second-guess yourself or correct yourself. Output your best answer once.
+`)
+
+	if len(stdinData) > 0 {
+		sample := truncate(string(stdinData), 2000)
+		sb.WriteString(fmt.Sprintf("\nSample of stdin data:\n```\n%s\n```\n", sample))
+	}
+
+	return sb.String()
 }
 
 func generateArgs(ctx context.Context, cfg Config, command, prompt, helpText string, stdinData []byte, examples []HistoryEntry) (aiResult, error) {
@@ -446,8 +774,18 @@ func parseArgs(text string) []string {
 	return args
 }
 
-func execute(command string, args []string, stdinData []byte) error {
-	cmd := exec.Command(command, args...)
+func execute(command string, args []string, stdinData []byte, shell bool) error {
+	var cmd *exec.Cmd
+	if shell {
+		// Build a single command string for sh -c
+		// Reconstruct: command arg1 arg2 ...
+		parts := make([]string, 0, len(args)+1)
+		parts = append(parts, command)
+		parts = append(parts, args...)
+		cmd = exec.Command("sh", "-c", strings.Join(parts, " "))
+	} else {
+		cmd = exec.Command(command, args...)
+	}
 	if len(stdinData) > 0 {
 		cmd.Stdin = bytes.NewReader(stdinData)
 	}
@@ -459,6 +797,24 @@ func execute(command string, args []string, stdinData []byte) error {
 		return err
 	}
 	return nil
+}
+
+// looksLikeCommentary detects lines that are explanatory text rather than args.
+// e.g. "Wait, `du` doesn't have --sort." or "This needs a pipe..."
+func looksLikeCommentary(line string) bool {
+	// Arguments typically start with - or are short tokens.
+	// Commentary tends to be long and contain sentence-like patterns.
+	words := strings.Fields(line)
+	if len(words) >= 6 {
+		return true
+	}
+	lower := strings.ToLower(line)
+	for _, marker := range []string{"wait", "note:", "let me", "this ", "however", "instead", "actually", "sorry", "correction"} {
+		if strings.Contains(lower, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 func truncate(s string, maxLen int) string {
@@ -476,20 +832,34 @@ const (
 	confirmRetry
 )
 
+func restoreTerminal() {
+	tty, err := os.OpenFile("/dev/tty", os.O_RDWR, 0)
+	if err != nil {
+		return
+	}
+	defer tty.Close()
+	cmd := exec.Command("stty", "sane", "echo", "icanon", "erase", "^?")
+	cmd.Stdin = tty
+	cmd.Stdout = tty
+	cmd.Stderr = tty
+	cmd.Run()
+}
+
 func askConfirm() confirmResult {
-	tty, err := os.Open("/dev/tty")
+	restoreTerminal()
+
+	tty, err := os.OpenFile("/dev/tty", os.O_RDWR, 0)
 	if err != nil {
 		return confirmNo
 	}
 	defer tty.Close()
 
-	fmt.Fprintf(os.Stderr, "[noman] execute? [Y/n/r(retry)] ")
-	buf := make([]byte, 64)
-	n, err := tty.Read(buf)
-	if err != nil {
+	fmt.Fprintf(tty, "[noman] execute? [Y/n/r(retry)] ")
+	scanner := bufio.NewScanner(tty)
+	if !scanner.Scan() {
 		return confirmNo
 	}
-	answer := strings.TrimSpace(strings.ToLower(string(buf[:n])))
+	answer := strings.TrimSpace(strings.ToLower(scanner.Text()))
 	switch answer {
 	case "", "y", "yes":
 		return confirmYes

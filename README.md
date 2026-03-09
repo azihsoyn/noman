@@ -36,6 +36,7 @@ cp noman /usr/local/bin/
 
 ```
 noman [options] <command> "<prompt>"
+noman which "<prompt>"
 ```
 
 ### Options
@@ -43,6 +44,8 @@ noman [options] <command> "<prompt>"
 | Option | Description |
 |---|---|
 | `--no-cache` | Skip cache and always call AI |
+| `--confirm`, `-c` | Show generated args and ask Y/n/r(retry) before executing |
+| `--shell`, `-s` | Execute via shell (enables glob `*`, pipes, etc.) |
 | `--debug` | Show generated args without executing |
 | `--help`, `-h` | Show help |
 
@@ -50,6 +53,7 @@ noman [options] <command> "<prompt>"
 
 | Subcommand | Description |
 |---|---|
+| `which "<prompt>"` | AI picks the best command for the task |
 | `man` | Show all past usage grouped by command |
 | `man <command>` | Show detailed history for a specific command |
 
@@ -96,6 +100,11 @@ noman docker "remove all stopped containers and dangling images"
 
 # git: complex log queries
 noman git "show only merge commits from last week"
+
+# don't know which command? let AI pick
+noman which "find all TODO comments in current directory"
+cat access.log | noman which "count requests per status code"
+noman which "disk usage of current directory, sorted by size"
 ```
 
 ## How it works
