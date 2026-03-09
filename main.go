@@ -99,9 +99,15 @@ func main() {
 	command := opts.command
 	prompt := opts.prompt
 
-	// Check if command exists
-	if _, err := exec.LookPath(command); err != nil {
-		fatal("command not found: %s", command)
+	// Check if command exists (supports paths like ./tool and /usr/local/bin/tool)
+	if strings.Contains(command, "/") {
+		if _, err := os.Stat(command); err != nil {
+			fatal("command not found: %s", command)
+		}
+	} else {
+		if _, err := exec.LookPath(command); err != nil {
+			fatal("command not found: %s", command)
+		}
 	}
 
 	// Read stdin if piped
