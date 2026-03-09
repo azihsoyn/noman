@@ -168,23 +168,40 @@ func main() {
 		}
 	}
 
-	// Print the generated command to stderr for visibility
-	fmt.Fprintf(os.Stderr, "[noman] %s %s\n", command, strings.Join(result.args, " "))
+	for {
+		// Print the generated command to stderr for visibility
+		fmt.Fprintf(os.Stderr, "[noman] %s %s\n", command, strings.Join(result.args, " "))
 
-	if opts.debug {
-		return
-	}
-
-	if opts.confirm {
-		if !askConfirm() {
-			fmt.Fprintf(os.Stderr, "[noman] aborted\n")
+		if opts.debug {
 			return
 		}
-	}
 
-	// Execute the command
-	if err := execute(command, result.args, stdinData); err != nil {
-		os.Exit(1)
+		if opts.confirm {
+			switch askConfirm() {
+			case confirmYes:
+				// proceed to execute
+			case confirmNo:
+				fmt.Fprintf(os.Stderr, "[noman] aborted\n")
+				return
+			case confirmRetry:
+				fmt.Fprintf(os.Stderr, "[noman] regenerating...\n")
+				spin := NewSpinner(fmt.Sprintf("Generating args for %s...", command))
+				spin.Start()
+				result, err = generateArgs(ctx, cfg, command, prompt, helpText, stdinData, examples)
+				spin.Stop()
+				exec.Command("stty", "sane").Run()
+				if err != nil {
+					fatal("failed to generate args: %v", err)
+				}
+				continue
+			}
+		}
+
+		// Execute the command
+		if err := execute(command, result.args, stdinData); err != nil {
+			os.Exit(1)
+		}
+		return
 	}
 }
 
@@ -443,21 +460,36 @@ func truncate(s string, maxLen int) string {
 	return s[:maxLen] + "\n... (truncated)"
 }
 
-func askConfirm() bool {
+type confirmResult int
+
+const (
+	confirmYes confirmResult = iota
+	confirmNo
+	confirmRetry
+)
+
+func askConfirm() confirmResult {
 	tty, err := os.Open("/dev/tty")
 	if err != nil {
-		return false
+		return confirmNo
 	}
 	defer tty.Close()
 
-	fmt.Fprintf(os.Stderr, "[noman] execute? [Y/n] ")
+	fmt.Fprintf(os.Stderr, "[noman] execute? [Y/n/r(retry)] ")
 	buf := make([]byte, 64)
 	n, err := tty.Read(buf)
 	if err != nil {
-		return false
+		return confirmNo
 	}
 	answer := strings.TrimSpace(strings.ToLower(string(buf[:n])))
-	return answer == "" || answer == "y" || answer == "yes"
+	switch answer {
+	case "", "y", "yes":
+		return confirmYes
+	case "r", "retry":
+		return confirmRetry
+	default:
+		return confirmNo
+	}
 }
 
 func fatal(format string, args ...interface{}) {
