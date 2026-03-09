@@ -6,6 +6,8 @@ Stop reading man pages. Just tell `noman` what you want to do.
 
 ## Demo
 
+![demo](./demo.svg)
+
 ```bash
 $ echo '[{"title":"ABC news","count":1},{"title":"XYZ report","count":2}]' | noman jq "filter items where title contains XYZ"
 [noman] jq .[] | select(.title | test("XYZ"))
