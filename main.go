@@ -27,6 +27,7 @@ Options:
 Subcommands:
   which "<prompt>"   AI picks the best command for you
   man [command]      Show past usage from history (like a personal man page)
+  noman "<prompt>"   Ask how to use noman itself
 
 Examples:
   cat data.json | noman jq "filter items where title contains XYZ"
@@ -90,6 +91,17 @@ func parseOptions() options {
 	// Handle subcommands
 	if rest[0] == "man" {
 		showMan(rest[1:])
+		os.Exit(0)
+	}
+
+	if rest[0] == "noman" {
+		if len(rest) < 2 {
+			fmt.Fprintln(os.Stderr, "Usage: noman noman \"<prompt>\"")
+			os.Exit(1)
+		}
+		cfg := loadConfig()
+		question := strings.Join(rest[1:], " ")
+		handleNoman(cfg, question)
 		os.Exit(0)
 	}
 
@@ -328,6 +340,136 @@ generate:
 		}
 		return
 	}
+}
+
+func handleNoman(cfg Config, question string) {
+	systemPrompt := fmt.Sprintf(`You are the help assistant for "noman", a CLI tool that converts natural language into command-line arguments using AI.
+
+Here is noman's full usage information:
+%s
+
+Answer the user's question about how to use noman. Be concise and practical. Show example commands when helpful. Reply in the same language as the user's question.`, usage)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	spin := NewSpinner("Thinking...")
+	spin.Start()
+	answer, err := askAI(ctx, cfg, systemPrompt, question)
+	spin.Stop()
+	restoreTerminal()
+	if err != nil {
+		if strings.Contains(err.Error(), "cancelled") || strings.Contains(err.Error(), "signal: killed") {
+			fmt.Fprintf(os.Stderr, "[noman] cancelled\n")
+			os.Exit(130)
+		}
+		fatal("failed: %v", err)
+	}
+	fmt.Println(answer)
+}
+
+func askAI(ctx context.Context, cfg Config, systemPrompt, userPrompt string) (string, error) {
+	switch cfg.Backend {
+	case "cli":
+		return askAICLI(ctx, cfg, systemPrompt, userPrompt)
+	case "api":
+		return askAIAPI(ctx, cfg, systemPrompt, userPrompt)
+	default:
+		return "", fmt.Errorf("unknown backend: %s", cfg.Backend)
+	}
+}
+
+func askAICLI(ctx context.Context, cfg Config, systemPrompt, userPrompt string) (string, error) {
+	claudePath := cfg.ClaudePath
+	if claudePath == "" {
+		var err error
+		claudePath, err = exec.LookPath("claude")
+		if err != nil {
+			return "", fmt.Errorf("claude command not found")
+		}
+	}
+
+	fullPrompt := systemPrompt + "\n\nUser question: " + userPrompt
+	cmd := exec.CommandContext(ctx, claudePath, "-p", fullPrompt)
+	env := os.Environ()
+	filteredEnv := make([]string, 0, len(env))
+	for _, e := range env {
+		if !strings.HasPrefix(e, "CLAUDECODE=") {
+			filteredEnv = append(filteredEnv, e)
+		}
+	}
+	cmd.Env = filteredEnv
+	var stdout, stderr bytes.Buffer
+	cmd.Stdin = bytes.NewReader(nil)
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	if err := cmd.Run(); err != nil {
+		if ctx.Err() != nil {
+			return "", fmt.Errorf("cancelled")
+		}
+		return "", fmt.Errorf("claude command failed: %v\n%s", err, stderr.String())
+	}
+
+	return strings.TrimSpace(stdout.String()), nil
+}
+
+func askAIAPI(ctx context.Context, cfg Config, systemPrompt, userPrompt string) (string, error) {
+	apiKey := cfg.APIKey
+	if apiKey == "" {
+		return "", fmt.Errorf("set api_key in config, or ANTHROPIC_API_KEY / NOMAN_API_KEY environment variable")
+	}
+
+	baseURL := cfg.BaseURL
+	if baseURL == "" {
+		baseURL = "https://api.anthropic.com"
+	}
+
+	reqBody := anthropicRequest{
+		Model:     cfg.Model,
+		MaxTokens: 1024,
+		System:    systemPrompt,
+		Messages:  []message{{Role: "user", Content: userPrompt}},
+	}
+
+	body, err := json.Marshal(reqBody)
+	if err != nil {
+		return "", err
+	}
+
+	req, err := http.NewRequestWithContext(ctx, "POST", baseURL+"/v1/messages", bytes.NewReader(body))
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-API-Key", apiKey)
+	req.Header.Set("Anthropic-Version", "2023-06-01")
+
+	resp, err := (&http.Client{Timeout: 30 * time.Second}).Do(req)
+	if err != nil {
+		return "", fmt.Errorf("API request failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", err
+	}
+
+	if resp.StatusCode != 200 {
+		return "", fmt.Errorf("API error (status %d): %s", resp.StatusCode, string(respBody))
+	}
+
+	var apiResp anthropicResponse
+	if err := json.Unmarshal(respBody, &apiResp); err != nil {
+		return "", fmt.Errorf("failed to parse response: %v", err)
+	}
+
+	if len(apiResp.Content) == 0 {
+		return "", fmt.Errorf("empty response from API")
+	}
+
+	return strings.TrimSpace(apiResp.Content[0].Text), nil
 }
 
 func getCommandHelp(command string) string {
