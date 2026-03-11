@@ -15,6 +15,7 @@ import (
 )
 
 const usage = `Usage: noman [options] <command> "<prompt>"
+       noman <command>
        noman which "<prompt>"
 
 Options:
@@ -25,11 +26,14 @@ Options:
   --help, -h       Show this help
 
 Subcommands:
+  <command>          Show practical recipes (reverse help) for the command
   which "<prompt>"   AI picks the best command for you
   man [command]      Show past usage from history (like a personal man page)
   noman "<prompt>"   Ask how to use noman itself
 
 Examples:
+  noman git                  Show practical git recipes
+  noman find                 Show practical find recipes
   cat data.json | noman jq "filter items where title contains XYZ"
   noman curl "fetch HTML from example.com"
   cat log.txt | noman grep "extract lines that look like errors"
@@ -116,8 +120,10 @@ func parseOptions() options {
 	}
 
 	if len(rest) < 2 {
-		fmt.Fprint(os.Stderr, usage)
-		os.Exit(1)
+		// Command specified without prompt: show reverse help
+		opts.command = rest[0]
+		opts.prompt = "" // signal reverse-help mode
+		return opts
 	}
 
 	opts.command = rest[0]
@@ -143,6 +149,12 @@ func main() {
 
 	// Load config
 	cfg := loadConfig()
+
+	// Reverse-help mode: command specified without prompt
+	if command != "" && prompt == "" {
+		handleReverseHelp(cfg, command)
+		return
+	}
 
 	// Auto-command mode: AI picks the command
 	if command == "" {
@@ -224,6 +236,28 @@ func main() {
 					command = cmdResult.command
 					continue
 				}
+			}
+
+			if opts.confirm {
+				execRes := executeWithCapture(command, cmdResult.args, stdinData, opts.shell)
+				if askPostExecRetry() {
+					retryPrompt := buildRetryPrompt(prompt, command, cmdResult.args, execRes, stdinData)
+					fmt.Fprintf(os.Stderr, "[noman] regenerating with context...\n")
+					spin := NewSpinner("Retrying with different approach...")
+					spin.Start()
+					cmdResult, err = generateCommandWithContext(ctx, cfg, retryPrompt, prompt)
+					spin.Stop()
+					restoreTerminal()
+					if err != nil {
+						fatal("failed to generate command: %v", err)
+					}
+					command = cmdResult.command
+					continue
+				}
+				if execRes.exitCode != 0 {
+					os.Exit(1)
+				}
+				return
 			}
 
 			if err := execute(command, cmdResult.args, stdinData, opts.shell); err != nil {
@@ -335,11 +369,162 @@ generate:
 		}
 
 		// Execute the command
+		if opts.confirm {
+			execRes := executeWithCapture(command, result.args, stdinData, opts.shell)
+			if askPostExecRetry() {
+				retryPrompt := buildRetryPrompt(prompt, command, result.args, execRes, stdinData)
+				fmt.Fprintf(os.Stderr, "[noman] regenerating with context...\n")
+				spin := NewSpinner("Retrying with different approach...")
+				spin.Start()
+				cmdResult, err := generateCommandWithContext(ctx, cfg, retryPrompt, prompt)
+				spin.Stop()
+				restoreTerminal()
+				if err != nil {
+					fatal("failed to generate command: %v", err)
+				}
+				command = cmdResult.command
+				result.args = cmdResult.args
+				result.cacheable = cmdResult.cacheable
+				continue
+			}
+			if execRes.exitCode != 0 {
+				os.Exit(1)
+			}
+			return
+		}
+
 		if err := execute(command, result.args, stdinData, opts.shell); err != nil {
 			os.Exit(1)
 		}
 		return
 	}
+}
+
+func handleReverseHelp(cfg Config, command string) {
+	// Check if command exists
+	if strings.Contains(command, "/") {
+		if _, err := os.Stat(command); err != nil {
+			fatal("command not found: %s", command)
+		}
+	} else {
+		if _, err := exec.LookPath(command); err != nil {
+			fatal("command not found: %s", command)
+		}
+	}
+
+	helpText := getCommandHelp(command)
+
+	// Load history for this command to include user's past usage
+	history := loadHistory()
+	examples := history.FewShotExamples(command)
+
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf(`You are a practical command-line cookbook generator. Given a command's help text, generate a "reverse help" — instead of listing options and their descriptions, show practical recipes: combinations of options that accomplish common tasks.
+
+OUTPUT FORMAT (strictly follow this, no exceptions):
+Use EXACTLY this line-based format. Do NOT use markdown. Do NOT add blank lines except where specified.
+
+SECTION:<section name>
+DESC:<short description of what this recipe accomplishes>
+CMD:<full command with arguments>
+NOTE:<brief explanation (only if the combination is non-obvious, otherwise omit this line)>
+DESC:<next recipe description>
+CMD:<command>
+SECTION:<next section>
+DESC:...
+CMD:...
+
+EXAMPLE OUTPUT:
+SECTION:基本操作
+DESC:直近のコミットログを簡潔に確認する
+CMD:git log --oneline -10
+DESC:特定ファイルの変更履歴を名前変更も追跡して表示
+CMD:git log --follow -p src/main.go
+NOTE:--follow でリネーム前の履歴も追跡、-p で差分も表示
+SECTION:検索・フィルタ
+DESC:コミットメッセージから特定キーワードを検索
+CMD:git log --all --oneline --grep='hotfix'
+
+RULES:
+- Default language is Japanese for descriptions and notes.
+- Show 10-20 of the MOST USEFUL recipes.
+- Use realistic values in examples (not placeholders like <foo>).
+- Focus on option COMBINATIONS that are more powerful together than individually.
+- Include lesser-known but powerful tricks.
+- Output ONLY the structured lines above. No preamble, no summary, no markdown.
+
+Command: %s
+`, command))
+
+	if helpText != "" {
+		sb.WriteString(fmt.Sprintf("\nCommand help text:\n```\n%s\n```\n", helpText))
+	}
+
+	if len(examples) > 0 {
+		sb.WriteString("\nThe user has previously used this command for:\n")
+		for _, e := range examples {
+			sb.WriteString(fmt.Sprintf("- \"%s\" → %s %s\n", e.Prompt, command, strings.Join(e.Args, " ")))
+		}
+		sb.WriteString("\nInclude recipes related to these past uses, plus other useful ones.\n")
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	spin := NewSpinner(fmt.Sprintf("Generating practical recipes for %s...", command))
+	spin.Start()
+	answer, err := askAI(ctx, cfg, sb.String(), fmt.Sprintf("Show me practical recipes for the %s command", command))
+	spin.Stop()
+	restoreTerminal()
+	if err != nil {
+		if strings.Contains(err.Error(), "cancelled") || strings.Contains(err.Error(), "signal: killed") {
+			fmt.Fprintf(os.Stderr, "[noman] cancelled\n")
+			os.Exit(130)
+		}
+		fatal("failed: %v", err)
+	}
+
+	renderReverseHelp(command, answer)
+}
+
+func renderReverseHelp(command, raw string) {
+	upper := strings.ToUpper(command)
+	header := fmt.Sprintf("NOMAN-%s(1)", upper)
+	title := fmt.Sprintf("Practical %s Recipes", upper)
+
+	// Header line
+	fmt.Fprintf(os.Stdout, "\n%s%s%s%s%s%s%s%s\n\n",
+		bold, header, reset,
+		centerPad(header, title),
+		bold, title, reset,
+		centerPad(title, header)+bold+header+reset)
+
+	fmt.Fprintf(os.Stdout, "%sNAME%s\n", bold, reset)
+	fmt.Fprintf(os.Stdout, "       %s - practical recipes and common patterns\n\n", command)
+
+	lines := strings.Split(raw, "\n")
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+
+		switch {
+		case strings.HasPrefix(line, "SECTION:"):
+			section := strings.TrimPrefix(line, "SECTION:")
+			fmt.Fprintf(os.Stdout, "%s%s%s\n", bold, section, reset)
+		case strings.HasPrefix(line, "DESC:"):
+			desc := strings.TrimPrefix(line, "DESC:")
+			fmt.Fprintf(os.Stdout, "       %s\n", desc)
+		case strings.HasPrefix(line, "CMD:"):
+			cmd := strings.TrimPrefix(line, "CMD:")
+			fmt.Fprintf(os.Stdout, "           %s$ %s%s\n", bold, cmd, reset)
+		case strings.HasPrefix(line, "NOTE:"):
+			note := strings.TrimPrefix(line, "NOTE:")
+			fmt.Fprintf(os.Stdout, "           %s%s%s\n", uline, note, reset)
+		}
+	}
+	fmt.Println()
 }
 
 func handleNoman(cfg Config, question string) {
@@ -388,6 +573,9 @@ func askAICLI(ctx context.Context, cfg Config, systemPrompt, userPrompt string) 
 			return "", fmt.Errorf("claude command not found")
 		}
 	}
+
+	ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	defer cancel()
 
 	fullPrompt := systemPrompt + "\n\nUser question: " + userPrompt
 	cmd := exec.CommandContext(ctx, claudePath, "-p", fullPrompt)
@@ -617,6 +805,9 @@ func generateCommandCLI(ctx context.Context, cfg Config, systemPrompt, prompt st
 		}
 	}
 
+	ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	defer cancel()
+
 	fullPrompt := systemPrompt + "\n\nUser request: " + prompt
 	cmd := exec.CommandContext(ctx, claudePath, "-p", fullPrompt)
 	env := os.Environ()
@@ -700,6 +891,59 @@ func generateCommandAPI(ctx context.Context, cfg Config, systemPrompt, prompt st
 	return parseCommandResponse(apiResp.Content[0].Text)
 }
 
+func buildRetryPrompt(originalPrompt string, prevCommand string, prevArgs []string, execRes executeResult, stdinData []byte) string {
+	var sb strings.Builder
+	sb.WriteString(`You are a command-line argument generator. The user describes what they want to do, and you determine the best Unix command and its arguments.
+
+The user's previous command did not produce the desired result. Based on the output below, suggest a better command or approach.
+You are NOT limited to the same command - feel free to suggest any command that would work better.
+
+OUTPUT FORMAT (strictly follow this, no exceptions):
+Line 1: CACHEABLE:yes or CACHEABLE:no
+Line 2: COMMAND:<command_name>
+Line 3+: one argument per line
+
+RULES:
+- Output ONLY the lines described above. ABSOLUTELY NO explanation, no commentary, no markdown, no thinking.
+- If an argument contains spaces, wrap it in single quotes.
+- Choose a SINGLE command. Do NOT suggest pipes or multiple commands.
+- The command will be run non-interactively. NEVER use options that require interactive input.
+- Only use commands commonly available on macOS/Linux.
+- Do NOT repeat the same command if it clearly failed. Try a different approach.
+
+`)
+
+	sb.WriteString(fmt.Sprintf("PREVIOUS ATTEMPT:\nCommand: %s %s\nExit code: %d\n",
+		prevCommand, strings.Join(prevArgs, " "), execRes.exitCode))
+
+	if execRes.stdout != "" {
+		sb.WriteString(fmt.Sprintf("Stdout:\n```\n%s\n```\n", truncate(execRes.stdout, 2000)))
+	} else {
+		sb.WriteString("Stdout: (empty)\n")
+	}
+	if execRes.stderr != "" {
+		sb.WriteString(fmt.Sprintf("Stderr:\n```\n%s\n```\n", truncate(execRes.stderr, 2000)))
+	}
+
+	if len(stdinData) > 0 {
+		sample := truncate(string(stdinData), 2000)
+		sb.WriteString(fmt.Sprintf("\nSample of stdin data:\n```\n%s\n```\n", sample))
+	}
+
+	return sb.String()
+}
+
+func generateCommandWithContext(ctx context.Context, cfg Config, retrySystemPrompt, userPrompt string) (commandResult, error) {
+	switch cfg.Backend {
+	case "cli":
+		return generateCommandCLI(ctx, cfg, retrySystemPrompt, userPrompt)
+	case "api":
+		return generateCommandAPI(ctx, cfg, retrySystemPrompt, userPrompt)
+	default:
+		return commandResult{}, fmt.Errorf("unknown backend: %s", cfg.Backend)
+	}
+}
+
 func buildAutoCommandPrompt(stdinData []byte) string {
 	var sb strings.Builder
 	sb.WriteString(`You are a command-line argument generator. The user describes what they want to do, and you determine the best Unix command and its arguments.
@@ -754,6 +998,9 @@ func generateArgsCLI(ctx context.Context, cfg Config, command, prompt, helpText 
 			return aiResult{}, fmt.Errorf("claude command not found. Set claude_path in config or NOMAN_CLAUDE_PATH, or use backend = \"api\"")
 		}
 	}
+
+	ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	defer cancel()
 
 	systemPrompt := buildSystemPrompt(command, helpText, stdinData, examples)
 	fullPrompt := systemPrompt + "\n\nUser request: " + prompt
@@ -916,6 +1163,12 @@ func parseArgs(text string) []string {
 	return args
 }
 
+type executeResult struct {
+	stdout   string
+	stderr   string
+	exitCode int
+}
+
 func execute(command string, args []string, stdinData []byte, shell bool) error {
 	var cmd *exec.Cmd
 	if shell {
@@ -939,6 +1192,42 @@ func execute(command string, args []string, stdinData []byte, shell bool) error 
 		return err
 	}
 	return nil
+}
+
+func executeWithCapture(command string, args []string, stdinData []byte, shell bool) executeResult {
+	var cmd *exec.Cmd
+	if shell {
+		parts := make([]string, 0, len(args)+1)
+		parts = append(parts, command)
+		parts = append(parts, args...)
+		cmd = exec.Command("sh", "-c", strings.Join(parts, " "))
+	} else {
+		cmd = exec.Command(command, args...)
+	}
+	if len(stdinData) > 0 {
+		cmd.Stdin = bytes.NewReader(stdinData)
+	}
+
+	var stdoutBuf, stderrBuf bytes.Buffer
+	cmd.Stdout = io.MultiWriter(os.Stdout, &stdoutBuf)
+	cmd.Stderr = io.MultiWriter(os.Stderr, &stderrBuf)
+
+	err := cmd.Run()
+	exitCode := 0
+	if err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			exitCode = exitErr.ExitCode()
+		} else {
+			exitCode = 1
+		}
+		fmt.Fprintf(os.Stderr, "[noman] command failed: %v\n", err)
+	}
+
+	return executeResult{
+		stdout:   stdoutBuf.String(),
+		stderr:   stderrBuf.String(),
+		exitCode: exitCode,
+	}
 }
 
 // looksLikeCommentary detects lines that are explanatory text rather than args.
@@ -995,6 +1284,24 @@ func restoreTerminal() {
 	cmd.Stdout = tty
 	cmd.Stderr = tty
 	cmd.Run()
+}
+
+func askPostExecRetry() bool {
+	restoreTerminal()
+
+	tty, err := os.OpenFile("/dev/tty", os.O_RDWR, 0)
+	if err != nil {
+		return false
+	}
+	defer tty.Close()
+
+	fmt.Fprintf(tty, "[noman] retry with different approach? [y/N] ")
+	scanner := bufio.NewScanner(tty)
+	if !scanner.Scan() {
+		return false
+	}
+	answer := strings.TrimSpace(strings.ToLower(scanner.Text()))
+	return answer == "y" || answer == "yes"
 }
 
 func askConfirm() confirmResult {
