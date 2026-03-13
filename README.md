@@ -68,7 +68,7 @@ noman which "<prompt>"
 | `--no-cache`      | Skip cache and always call AI                             |
 | `--confirm`, `-c` | Show generated args and ask Y/n/r(retry) before executing |
 | `--shell`, `-s`   | Execute via shell (enables glob `*`, pipes, etc.)         |
-| `--debug`         | Show generated args without executing                     |
+| `--dry-run`       | Show generated args without executing                     |
 | `--help`, `-h`    | Show help                                                 |
 
 ---

@@ -22,7 +22,7 @@ Options:
   --no-cache       Skip cache and always call AI
   --confirm, -c    Show generated args and ask Y/n before executing
   --shell, -s      Execute via shell (enables glob, pipes, etc.)
-  --debug          Show generated args without executing
+  --dry-run        Show generated args without executing
   --help, -h       Show this help
 
 Subcommands:
@@ -57,7 +57,7 @@ Environment variables (override config):
 type options struct {
 	noCache bool
 	confirm bool
-	debug   bool
+	dryRun  bool
 	shell   bool
 	command string
 	prompt  string
@@ -77,8 +77,8 @@ func parseOptions() options {
 			opts.confirm = true
 		case "--shell", "-s":
 			opts.shell = true
-		case "--debug":
-			opts.debug = true
+		case "--dry-run":
+			opts.dryRun = true
 		case "--help", "-h":
 			fmt.Fprint(os.Stderr, usage)
 			os.Exit(0)
@@ -164,7 +164,7 @@ func main() {
 		if !opts.noCache {
 			if cachedCmd, cachedArgs, ok := history.FindByPrompt(prompt, stdinHash(stdinData)); ok {
 				fmt.Fprintf(os.Stderr, "[noman] (cached) %s %s\n", cachedCmd, strings.Join(cachedArgs, " "))
-				if opts.debug {
+				if opts.dryRun {
 					return
 				}
 				if opts.confirm {
@@ -204,15 +204,13 @@ func main() {
 		command = cmdResult.command
 
 		// Save to history
-		if cmdResult.cacheable {
-			history.Add(command, prompt, cmdResult.args, stdinData)
-			_ = history.save()
-		}
+		history.Add(command, prompt, cmdResult.args, stdinData, cmdResult.cacheable)
+		_ = history.save()
 
 		for {
 			fmt.Fprintf(os.Stderr, "[noman] %s %s\n", command, strings.Join(cmdResult.args, " "))
 
-			if opts.debug {
+			if opts.dryRun {
 				return
 			}
 
@@ -285,7 +283,7 @@ func main() {
 	if !opts.noCache {
 		if args, ok := history.FindExact(command, prompt, stdinHash(stdinData)); ok {
 			fmt.Fprintf(os.Stderr, "[noman] (cached) %s %s\n", command, strings.Join(args, " "))
-			if opts.debug {
+			if opts.dryRun {
 				return
 			}
 			if opts.confirm {
@@ -331,19 +329,17 @@ generate:
 		fatal("failed to generate args: %v", err)
 	}
 
-	// Save to history only if cacheable
-	if result.cacheable {
-		history.Add(command, prompt, result.args, stdinData)
-		if err := history.save(); err != nil {
-			fmt.Fprintf(os.Stderr, "[noman] warning: failed to save history: %v\n", err)
-		}
+	// Save to history
+	history.Add(command, prompt, result.args, stdinData, result.cacheable)
+	if err := history.save(); err != nil {
+		fmt.Fprintf(os.Stderr, "[noman] warning: failed to save history: %v\n", err)
 	}
 
 	for {
 		// Print the generated command to stderr for visibility
 		fmt.Fprintf(os.Stderr, "[noman] %s %s\n", command, strings.Join(result.args, " "))
 
-		if opts.debug {
+		if opts.dryRun {
 			return
 		}
 

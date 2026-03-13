@@ -16,6 +16,7 @@ type HistoryEntry struct {
 	Prompt    string    `json:"prompt"`
 	Args      []string  `json:"args"`
 	StdinHash string    `json:"stdin_hash,omitempty"`
+	Cacheable bool      `json:"cacheable"`
 	CreatedAt time.Time `json:"created_at"`
 	UseCount  int       `json:"use_count"`
 }
@@ -68,10 +69,11 @@ func stdinHash(data []byte) string {
 }
 
 // FindExact returns cached args if the same command+prompt+stdin was used before.
+// Only returns cacheable entries.
 func (h *History) FindExact(command, prompt string, sHash string) ([]string, bool) {
 	for i := len(h.Entries) - 1; i >= 0; i-- {
 		e := &h.Entries[i]
-		if e.Command == command && e.Prompt == prompt && e.StdinHash == sHash {
+		if e.Command == command && e.Prompt == prompt && e.StdinHash == sHash && e.Cacheable {
 			e.UseCount++
 			return e.Args, true
 		}
@@ -80,10 +82,11 @@ func (h *History) FindExact(command, prompt string, sHash string) ([]string, boo
 }
 
 // FindByPrompt returns cached command+args matching prompt+stdin (for "which" mode).
+// Only returns cacheable entries.
 func (h *History) FindByPrompt(prompt string, sHash string) (string, []string, bool) {
 	for i := len(h.Entries) - 1; i >= 0; i-- {
 		e := &h.Entries[i]
-		if e.Prompt == prompt && e.StdinHash == sHash {
+		if e.Prompt == prompt && e.StdinHash == sHash && e.Cacheable {
 			e.UseCount++
 			return e.Command, e.Args, true
 		}
@@ -117,11 +120,12 @@ func (h *History) FewShotExamples(command string) []HistoryEntry {
 }
 
 // Add records a new prompt→args mapping.
-func (h *History) Add(command, prompt string, args []string, stdinData []byte) {
+func (h *History) Add(command, prompt string, args []string, stdinData []byte, cacheable bool) {
 	// Update existing entry if same command+prompt
 	for i := range h.Entries {
 		if h.Entries[i].Command == command && h.Entries[i].Prompt == prompt {
 			h.Entries[i].Args = args
+			h.Entries[i].Cacheable = cacheable
 			h.Entries[i].UseCount++
 			h.Entries[i].CreatedAt = time.Now()
 			return
@@ -133,6 +137,7 @@ func (h *History) Add(command, prompt string, args []string, stdinData []byte) {
 		Prompt:    prompt,
 		Args:      args,
 		StdinHash: stdinHash(stdinData),
+		Cacheable: cacheable,
 		CreatedAt: time.Now(),
 		UseCount:  1,
 	})
