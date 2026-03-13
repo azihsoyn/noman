@@ -238,21 +238,21 @@ func main() {
 
 			if opts.confirm {
 				execRes := executeWithCapture(command, cmdResult.args, stdinData, opts.shell)
-				if askPostExecRetry() {
-					retryPrompt := buildRetryPrompt(prompt, command, cmdResult.args, execRes, stdinData)
-					fmt.Fprintf(os.Stderr, "[noman] regenerating with context...\n")
-					spin := NewSpinner("Retrying with different approach...")
-					spin.Start()
-					cmdResult, err = generateCommandWithContext(ctx, cfg, retryPrompt, prompt)
-					spin.Stop()
-					restoreTerminal()
-					if err != nil {
-						fatal("failed to generate command: %v", err)
-					}
-					command = cmdResult.command
-					continue
-				}
 				if execRes.exitCode != 0 {
+					if askPostExecRetry() {
+						retryPrompt := buildRetryPrompt(prompt, command, cmdResult.args, execRes, stdinData)
+						fmt.Fprintf(os.Stderr, "[noman] regenerating with context...\n")
+						spin := NewSpinner("Retrying with different approach...")
+						spin.Start()
+						cmdResult, err = generateCommandWithContext(ctx, cfg, retryPrompt, prompt)
+						spin.Stop()
+						restoreTerminal()
+						if err != nil {
+							fatal("failed to generate command: %v", err)
+						}
+						command = cmdResult.command
+						continue
+					}
 					os.Exit(1)
 				}
 				return
@@ -367,23 +367,23 @@ generate:
 		// Execute the command
 		if opts.confirm {
 			execRes := executeWithCapture(command, result.args, stdinData, opts.shell)
-			if askPostExecRetry() {
-				retryPrompt := buildRetryPrompt(prompt, command, result.args, execRes, stdinData)
-				fmt.Fprintf(os.Stderr, "[noman] regenerating with context...\n")
-				spin := NewSpinner("Retrying with different approach...")
-				spin.Start()
-				cmdResult, err := generateCommandWithContext(ctx, cfg, retryPrompt, prompt)
-				spin.Stop()
-				restoreTerminal()
-				if err != nil {
-					fatal("failed to generate command: %v", err)
-				}
-				command = cmdResult.command
-				result.args = cmdResult.args
-				result.cacheable = cmdResult.cacheable
-				continue
-			}
 			if execRes.exitCode != 0 {
+				if askPostExecRetry() {
+					retryPrompt := buildRetryPrompt(prompt, command, result.args, execRes, stdinData)
+					fmt.Fprintf(os.Stderr, "[noman] regenerating with context...\n")
+					spin := NewSpinner("Retrying with different approach...")
+					spin.Start()
+					cmdResult, err := generateCommandWithContext(ctx, cfg, retryPrompt, prompt)
+					spin.Stop()
+					restoreTerminal()
+					if err != nil {
+						fatal("failed to generate command: %v", err)
+					}
+					command = cmdResult.command
+					result.args = cmdResult.args
+					result.cacheable = cmdResult.cacheable
+					continue
+				}
 				os.Exit(1)
 			}
 			return
